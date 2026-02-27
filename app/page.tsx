@@ -1,7 +1,9 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { supabase } from '../lib/supabaseClient';
+import type { User } from '@supabase/supabase-js';
+import { supabase } from '@/lib/supabaseClient';
+import AuthForm from './components/AuthForm';
 
 type Munchie = {
   id: number;
@@ -13,15 +15,21 @@ type Munchie = {
   session_id: number | null;
   strain_name?: string | null;
   product_type?: string | null;
+  user_id?: string | null;
+  username?: string | null;
 };
 
-type Tab = 'dashboard' | 'new' | 'munchies';
+type Tab = 'dashboard' | 'new' | 'munchies' | 'feed';
 
 export default function Home() {
-  // which tab in the sidebar is active
+  // Auth
+  const [user, setUser] = useState<User | null>(null);
+  const [authLoading, setAuthLoading] = useState(true);
+
+  // Navigation
   const [activeTab, setActiveTab] = useState<Tab>('dashboard');
 
-  // form state
+  // Form state
   const [strain, setStrain] = useState('');
   const [productType, setProductType] = useState('Pre-roll');
   const [brand, setBrand] = useState('');
@@ -33,11 +41,31 @@ export default function Home() {
   const [isSaving, setIsSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
 
-  // all munchies from the database (we'll slice this for "Recent" vs "All")
-  const [recentMunchies, setRecentMunchies] = useState<Munchie[]>([]);
+  // Data — all munchies from everyone; filtered per-user where needed
+  const [allMunchies, setAllMunchies] = useState<Munchie[]>([]);
 
-  // Load ALL munchies from Supabase when the page loads
+  // ---------- Auth ----------
+
   useEffect(() => {
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setUser(session?.user ?? null);
+      setAuthLoading(false);
+    });
+
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, session) => {
+      setUser(session?.user ?? null);
+    });
+
+    return () => subscription.unsubscribe();
+  }, []);
+
+  // ---------- Data loading ----------
+
+  useEffect(() => {
+    if (!user) return;
+
     const loadMunchies = async () => {
       const { data, error } = await supabase
         .from('munchies')
@@ -52,7 +80,11 @@ export default function Home() {
           session_id,
           sessions (
             strain_name,
-            product_type
+            product_type,
+            user_id,
+            profiles (
+              username
+            )
           )
         `
         )
@@ -74,22 +106,25 @@ export default function Home() {
           session_id: row.session_id,
           strain_name: row.sessions?.strain_name ?? null,
           product_type: row.sessions?.product_type ?? null,
+          user_id: row.sessions?.user_id ?? null,
+          username: row.sessions?.profiles?.username ?? null,
         })) ?? [];
 
-      setRecentMunchies(mapped);
+      setAllMunchies(mapped);
     };
 
     loadMunchies();
-  }, []);
+  }, [user]);
 
-  // Save a new session + munchie
+  // ---------- Form submit ----------
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsSaving(true);
     setMessage(null);
 
     try {
-      // 1) create session row
+      // 1) Create session row
       const { data: sessionData, error: sessionError } = await supabase
         .from('sessions')
         .insert({
@@ -97,24 +132,23 @@ export default function Home() {
           product_type: productType || null,
           brand: brand || null,
           high_rating: highRating || null,
+          user_id: user?.id,
         })
         .select('id')
         .single();
 
       if (sessionError || !sessionData) {
-        console.log('Session insert error:', sessionError, sessionData);
+        console.log('Session insert error:', sessionError);
         setMessage('Error saving session.');
         setIsSaving(false);
         return;
       }
 
-      const sessionId = sessionData.id;
-
-      // 2) create munchie row
+      // 2) Create munchie row
       const { data: munchieData, error: munchieError } = await supabase
         .from('munchies')
         .insert({
-          session_id: sessionId,
+          session_id: sessionData.id,
           food_name: foodName || null,
           source_type: sourceType || null,
           rating: munchieRating || null,
@@ -124,14 +158,16 @@ export default function Home() {
         .single();
 
       if (munchieError || !munchieData) {
-        console.log('Munchie insert error:', munchieError, munchieData);
+        console.log('Munchie insert error:', munchieError);
         setMessage('Error saving munchie.');
         setIsSaving(false);
         return;
       }
 
-      // add new munchie to the top of the list so it shows immediately
-      setRecentMunchies((prev) => [
+      // 3) Optimistically prepend to local state
+      const currentUsername = user?.user_metadata?.username ?? null;
+
+      setAllMunchies((prev) => [
         {
           id: munchieData.id,
           food_name: munchieData.food_name,
@@ -142,6 +178,8 @@ export default function Home() {
           session_id: munchieData.session_id,
           strain_name: strain || null,
           product_type: productType || null,
+          user_id: user?.id ?? null,
+          username: currentUsername,
         },
         ...prev,
       ]);
@@ -155,7 +193,6 @@ export default function Home() {
       setSourceType('Homemade');
       setMunchieRating(5);
       setDescription('');
-
       setMessage('Session saved ✅');
     } catch (err) {
       console.log('Unhandled error in handleSubmit:', err);
@@ -165,7 +202,18 @@ export default function Home() {
     }
   };
 
-  // ---------- Small helper render functions ----------
+  const handleSignOut = async () => {
+    await supabase.auth.signOut();
+    setAllMunchies([]);
+    setActiveTab('dashboard');
+  };
+
+  // ---------- Derived data ----------
+
+  const myMunchies = allMunchies.filter((m) => m.user_id === user?.id);
+  const username = user?.user_metadata?.username as string | undefined;
+
+  // ---------- Render helpers ----------
 
   const renderForm = () => (
     <form
@@ -315,100 +363,106 @@ export default function Home() {
       </button>
 
       {message && (
-        <p className="text-xs text-slate-300 mt-2">
-          {message}
-        </p>
+        <p className="text-xs text-slate-300 mt-2">{message}</p>
       )}
     </form>
   );
 
-  const renderRecent = () => {
-    const lastFive = recentMunchies.slice(0, 5);
-
-    return (
-      <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-lg">
-        <h2 className="text-lg font-semibold mb-2">Recent munchies</h2>
-        <p className="text-xs text-slate-400 mb-4">
-          Your last few legendary combos.
-        </p>
-
-        {lastFive.length === 0 && (
-          <p className="text-xs text-slate-500">No munchies logged yet.</p>
-        )}
-
-        <div className="space-y-4">
-          {lastFive.map((m) => (
-            <div
-              key={m.id}
-              className="border border-slate-800 rounded-xl px-4 py-3 text-sm"
-            >
-              <div className="flex justify-between items-center mb-1">
-                <div className="uppercase text-[11px] tracking-[0.16em] text-slate-400">
-                  {m.strain_name || 'Unknown strain'} · {m.product_type || '?'}
-                </div>
-                <div className="text-amber-300 text-xs">
-                  {'★'.repeat(m.rating ?? 0)}
-                </div>
-              </div>
-              <div className="font-medium">
-                {m.food_name || 'Unknown food'}
-              </div>
-              <div className="text-[11px] text-slate-400 mt-1">
-                {m.source_type || 'Unknown source'}
-              </div>
-              {m.description && (
-                <p className="text-xs text-slate-300 mt-2 line-clamp-3">
-                  {m.description}
-                </p>
-              )}
-            </div>
-          ))}
+  const renderMunchieCard = (m: Munchie, showUser = false) => (
+    <div
+      key={m.id}
+      className="border border-slate-800 rounded-xl px-4 py-3 text-sm bg-slate-900/60"
+    >
+      {showUser && m.username && (
+        <div className="flex items-center gap-2 mb-2">
+          <div className="h-6 w-6 rounded-full bg-emerald-500 flex items-center justify-center text-xs font-bold text-slate-950 shrink-0">
+            {m.username[0].toUpperCase()}
+          </div>
+          <span className="text-xs text-emerald-400 font-medium">@{m.username}</span>
+        </div>
+      )}
+      <div className="flex justify-between items-center mb-1">
+        <div className="uppercase text-[11px] tracking-[0.16em] text-slate-400">
+          {m.strain_name || 'Unknown strain'} · {m.product_type || '?'}
+        </div>
+        <div className="text-amber-300 text-xs">
+          {m.rating ? '★'.repeat(m.rating) : ''}
         </div>
       </div>
-    );
-  };
+      <div className="font-medium">{m.food_name || 'Unknown food'}</div>
+      <div className="text-[11px] text-slate-400 mt-1">
+        {m.source_type || 'Unknown source'} ·{' '}
+        {new Date(m.created_at).toLocaleString()}
+      </div>
+      {m.description && (
+        <p className="text-xs text-slate-300 mt-2 line-clamp-3">{m.description}</p>
+      )}
+    </div>
+  );
 
-  const renderAllMunchies = () => {
-    if (recentMunchies.length === 0) {
+  const renderRecent = () => (
+    <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-lg">
+      <h2 className="text-lg font-semibold mb-2">Recent munchies</h2>
+      <p className="text-xs text-slate-400 mb-4">Your last few legendary combos.</p>
+
+      {myMunchies.length === 0 ? (
+        <p className="text-xs text-slate-500">No munchies logged yet.</p>
+      ) : (
+        <div className="space-y-4">
+          {myMunchies.slice(0, 5).map((m) => renderMunchieCard(m))}
+        </div>
+      )}
+    </div>
+  );
+
+  const renderMyMunchies = () => {
+    if (myMunchies.length === 0) {
       return (
         <p className="text-sm text-slate-400">
           No munchies logged yet. Save your first session from the Dashboard tab.
         </p>
       );
     }
+    return (
+      <div className="space-y-3">{myMunchies.map((m) => renderMunchieCard(m))}</div>
+    );
+  };
 
+  const renderFeed = () => {
+    if (allMunchies.length === 0) {
+      return (
+        <p className="text-sm text-slate-400">No munchies posted yet. Be the first!</p>
+      );
+    }
     return (
       <div className="space-y-3">
-        {recentMunchies.map((m) => (
-          <div
-            key={m.id}
-            className="border border-slate-800 rounded-xl px-4 py-3 text-sm bg-slate-900/60"
-          >
-            <div className="flex justify-between items-center mb-1">
-              <div className="uppercase text-[11px] tracking-[0.16em] text-slate-400">
-                {m.strain_name || 'Unknown strain'} · {m.product_type || '?'}
-              </div>
-              <div className="text-amber-300 text-xs">
-                {m.rating ? '★'.repeat(m.rating) : ''}
-              </div>
-            </div>
-            <div className="font-medium">
-              {m.food_name || 'Unknown food'}
-            </div>
-            <div className="text-[11px] text-slate-400 mt-1">
-              {m.source_type || 'Unknown source'} ·{' '}
-              {new Date(m.created_at).toLocaleString()}
-            </div>
-            {m.description && (
-              <p className="text-xs text-slate-300 mt-2">{m.description}</p>
-            )}
-          </div>
-        ))}
+        {allMunchies.map((m) => renderMunchieCard(m, true))}
       </div>
     );
   };
 
-  // ---------- MAIN LAYOUT ----------
+  // ---------- Auth gates ----------
+
+  if (authLoading) {
+    return (
+      <div className="min-h-screen bg-slate-950 flex items-center justify-center">
+        <div className="text-slate-400 text-sm">Loading…</div>
+      </div>
+    );
+  }
+
+  if (!user) {
+    return <AuthForm />;
+  }
+
+  // ---------- Main app ----------
+
+  const navItems: { id: Tab; label: string }[] = [
+    { id: 'dashboard', label: 'Dashboard' },
+    { id: 'new', label: 'Log new session' },
+    { id: 'munchies', label: 'My munchies' },
+    { id: 'feed', label: '🌍 Public feed' },
+  ];
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-50 flex">
@@ -418,49 +472,50 @@ export default function Home() {
           <div className="text-left font-bold tracking-tight text-xl mb-1">
             🍔 Munchboxd
           </div>
-          <p className="text-xs text-slate-400">
-            Letterboxd for munchies. Log your combos & see them all.
-          </p>
+          <p className="text-xs text-slate-400">Letterboxd for munchies.</p>
         </div>
 
+        {/* User badge */}
+        <div className="flex items-center gap-3 bg-slate-900 rounded-xl px-3 py-2">
+          <div className="h-8 w-8 rounded-full bg-emerald-500 flex items-center justify-center text-sm font-bold text-slate-950 shrink-0">
+            {username?.[0]?.toUpperCase() ?? '?'}
+          </div>
+          <div className="min-w-0">
+            <div className="text-sm font-medium truncate">@{username ?? 'you'}</div>
+            <div className="text-[11px] text-slate-400 truncate">{user.email}</div>
+          </div>
+        </div>
+
+        {/* Nav */}
         <nav className="flex flex-col gap-2 text-sm">
-          <button
-            onClick={() => setActiveTab('dashboard')}
-            className={`text-left px-3 py-2 rounded-lg ${
-              activeTab === 'dashboard'
-                ? 'bg-slate-800 text-emerald-300'
-                : 'text-slate-300 hover:bg-slate-900'
-            }`}
-          >
-            Dashboard
-          </button>
-
-          <button
-            onClick={() => setActiveTab('new')}
-            className={`text-left px-3 py-2 rounded-lg ${
-              activeTab === 'new'
-                ? 'bg-slate-800 text-emerald-300'
-                : 'text-slate-300 hover:bg-slate-900'
-            }`}
-          >
-            Log new session
-          </button>
-
-          <button
-            onClick={() => setActiveTab('munchies')}
-            className={`text-left px-3 py-2 rounded-lg ${
-              activeTab === 'munchies'
-                ? 'bg-slate-800 text-emerald-300'
-                : 'text-slate-300 hover:bg-slate-900'
-            }`}
-          >
-            My munchies (all logs)
-          </button>
+          {navItems.map(({ id, label }) => (
+            <button
+              key={id}
+              onClick={() => setActiveTab(id)}
+              className={`text-left px-3 py-2 rounded-lg ${
+                activeTab === id
+                  ? 'bg-slate-800 text-emerald-300'
+                  : 'text-slate-300 hover:bg-slate-900'
+              }`}
+            >
+              {label}
+            </button>
+          ))}
         </nav>
+
+        {/* Sign out at bottom */}
+        <div className="mt-auto">
+          <button
+            onClick={handleSignOut}
+            className="w-full text-left px-3 py-2 rounded-lg text-slate-500 hover:bg-slate-900 hover:text-slate-300 text-sm transition-colors"
+          >
+            Sign out
+          </button>
+        </div>
       </aside>
 
       {/* Main content */}
-      <main className="flex-1 px-10 py-10">
+      <main className="flex-1 px-10 py-10 overflow-y-auto">
         {activeTab === 'dashboard' && (
           <div className="grid grid-cols-[minmax(0,2fr)_minmax(0,1fr)] gap-8">
             {renderForm()}
@@ -469,15 +524,21 @@ export default function Home() {
         )}
 
         {activeTab === 'new' && (
-          <div className="max-w-3xl">
-            {renderForm()}
-          </div>
+          <div className="max-w-3xl">{renderForm()}</div>
         )}
 
         {activeTab === 'munchies' && (
           <div className="max-w-4xl">
-            <h2 className="text-lg font-semibold mb-4">All munchies</h2>
-            {renderAllMunchies()}
+            <h2 className="text-lg font-semibold mb-4">My munchies</h2>
+            {renderMyMunchies()}
+          </div>
+        )}
+
+        {activeTab === 'feed' && (
+          <div className="max-w-4xl">
+            <h2 className="text-lg font-semibold mb-1">Public feed</h2>
+            <p className="text-xs text-slate-400 mb-4">Everyone&apos;s legendary combos.</p>
+            {renderFeed()}
           </div>
         )}
       </main>
