@@ -67,6 +67,14 @@ export default function Home() {
     if (!user) return;
 
     const loadMunchies = async () => {
+      // Ensure profile exists — handles accounts where the signup trigger may have failed
+      const uname =
+        (user.user_metadata?.username as string | undefined) ??
+        'user_' + user.id.substring(0, 8);
+      await supabase
+        .from('profiles')
+        .upsert({ id: user.id, username: uname }, { onConflict: 'id', ignoreDuplicates: true });
+
       const { data, error } = await supabase
         .from('munchies')
         .select(
@@ -465,9 +473,42 @@ export default function Home() {
   ];
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-50 flex">
-      {/* Sidebar */}
-      <aside className="w-64 border-r border-slate-900 px-4 py-6 flex flex-col gap-6">
+    <div className="min-h-screen bg-slate-950 text-slate-50 flex flex-col md:flex-row">
+      {/* Mobile top bar */}
+      <div className="md:hidden flex items-center justify-between px-4 py-3 border-b border-slate-900 shrink-0">
+        <div className="font-bold tracking-tight text-lg">🍔 Munchboxd</div>
+        <div className="flex items-center gap-3">
+          <div className="h-7 w-7 rounded-full bg-emerald-500 flex items-center justify-center text-xs font-bold text-slate-950 shrink-0">
+            {username?.[0]?.toUpperCase() ?? '?'}
+          </div>
+          <button
+            onClick={handleSignOut}
+            className="text-xs text-slate-400 hover:text-slate-200"
+          >
+            Sign out
+          </button>
+        </div>
+      </div>
+
+      {/* Mobile tab bar */}
+      <div className="md:hidden flex border-b border-slate-900 shrink-0 overflow-x-auto">
+        {navItems.map(({ id, label }) => (
+          <button
+            key={id}
+            onClick={() => setActiveTab(id)}
+            className={`px-4 py-2.5 text-xs font-medium whitespace-nowrap shrink-0 border-b-2 transition-colors ${
+              activeTab === id
+                ? 'border-emerald-400 text-emerald-300'
+                : 'border-transparent text-slate-400'
+            }`}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {/* Sidebar — desktop only */}
+      <aside className="hidden md:flex w-64 shrink-0 border-r border-slate-900 px-4 py-6 flex-col gap-6">
         <div>
           <div className="text-left font-bold tracking-tight text-xl mb-1">
             🍔 Munchboxd
@@ -515,9 +556,9 @@ export default function Home() {
       </aside>
 
       {/* Main content */}
-      <main className="flex-1 px-10 py-10 overflow-y-auto">
+      <main className="flex-1 min-w-0 px-4 py-6 md:px-10 md:py-10 overflow-y-auto">
         {activeTab === 'dashboard' && (
-          <div className="grid grid-cols-[minmax(0,2fr)_minmax(0,1fr)] gap-8">
+          <div className="grid grid-cols-1 md:grid-cols-[minmax(0,2fr)_minmax(0,1fr)] gap-8">
             {renderForm()}
             {renderRecent()}
           </div>
